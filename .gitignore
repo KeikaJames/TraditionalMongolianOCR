@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+.ruff_cache/
+.pytest_cache/
+
+# Model checkpoints / artifacts (never commit weights)
+*.pt
+*.pt.last
+*.ckpt
+*.safetensors
+
+# Alphabet QA artifacts (counts/histogram leak corpus statistics) — keep local
+*.counts.json
+
+# Data (corpus, shards, rendered images) never committed
+data/
+shards/
+pages/
+*.tar
+*.jsonl
+
+# OS
+.DS_Store

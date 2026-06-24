@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mongocr"
+version = "0.1.0"
+description = "From-scratch CRNN+CTC OCR for traditional (vertical) Mongolian script"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=1.24",
+    "pillow>=9",
+    "torch>=2.1",
+    "webdataset>=0.2.86",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "ruff>=0.4"]
+# Synthetic data generation (Playwright renderer). Browsers install separately:
+#   playwright install chromium
+render = ["playwright>=1.40"]
+
+[tool.setuptools.packages.find]
+include = ["mongocr*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
