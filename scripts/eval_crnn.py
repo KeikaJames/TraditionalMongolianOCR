@@ -10,7 +10,7 @@ Usage::
     python3 -m scripts.eval_crnn \
         --shards '/path/to/shards/shard-*.tar' \
         --alphabet alphabet.json --ckpt crnn.pt \
-        --eval-threshold 430000 --gap 200 --max-batches 200
+        --val-threshold 434600 --test-threshold 435200 --split test --max-batches 200
 """
 
 from __future__ import annotations

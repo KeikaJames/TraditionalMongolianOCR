@@ -15,14 +15,13 @@ Usage (from repo root)::
         --shards '/path/to/image2text/shards/shard-*.tar' \
         --shards '/path/to/image2text/hanshi_shards/shard-*.tar' \
         --alphabet alphabet.json \
-        --eval-threshold 430000 --gap 200 \
+        --val-threshold 434600 --test-threshold 435200 --gap 200 \
         --batch-size 64 --device cuda --save crnn.pt
 """
 
 from __future__ import annotations
 
 import argparse
-import math
 import time
 from pathlib import Path
 
@@ -98,6 +97,11 @@ def main() -> int:
     ap.add_argument("--batch-size", type=int, default=64)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--warmup", type=int, default=1000)
+    ap.add_argument("--lr-patience", type=int, default=4,
+                    help="halve LR after this many subset-evals with no val improvement")
+    ap.add_argument("--lr-decay", type=float, default=0.5)
+    ap.add_argument("--min-lr-divisor", type=float, default=64.0,
+                    help="floor LR at base_lr / this; stop once floored and stalled")
     ap.add_argument("--img-h", type=int, default=1024)
     ap.add_argument("--img-w", type=int, default=64)
     ap.add_argument("--lstm-hidden", type=int, default=384)
@@ -141,13 +145,15 @@ def main() -> int:
                  blank_bias=args.blank_bias).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
-    def lr_at(step):
-        if step < args.warmup:
-            return step / max(1, args.warmup)
-        # cosine to 0 over the remaining budget
-        p = (step - args.warmup) / max(1, args.steps - args.warmup)
-        return 0.5 * (1 + math.cos(math.pi * min(1.0, p)))
-    sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_at)
+    # LR: linear warmup, then hold; halve on val-CER plateau (ReduceLROnPlateau),
+    # floored at base_lr/min_lr_divisor. Early-stop only once LR is floored AND
+    # still not improving — so the schedule anneals into the plateau wherever it
+    # lands (unknown horizon), instead of a cosine stretched over a step cap the
+    # run never reaches.
+    base_lr = args.lr
+    min_lr = base_lr / args.min_lr_divisor
+    plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        opt, mode="min", factor=args.lr_decay, patience=args.lr_patience, min_lr=min_lr)
 
     start_step = 0
     if args.resume and Path(args.resume).exists():
@@ -178,6 +184,10 @@ def main() -> int:
         except StopIteration:
             data_iter = iter(train_loader)
             imgs, padded, lengths = next(data_iter)
+        # linear warmup, then LR is governed by ReduceLROnPlateau (below)
+        if step < args.warmup:
+            for g in opt.param_groups:
+                g["lr"] = base_lr * (step + 1) / args.warmup
         imgs = imgs.to(device)
         log_probs = model(imgs).log_softmax(dim=-1)
         loss = ctc_loss(log_probs, padded.to(device), lengths, blank=blank)
@@ -185,14 +195,13 @@ def main() -> int:
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), 5.0)
         opt.step()
-        sched.step()
         step += 1
         seen += args.batch_size
 
         if step % 50 == 0:
             rate = (step - start_step) / (time.time() - t0)
             print(f"[crnn] step {step:7d} ctc={loss.item():.3f} "
-                  f"lr={sched.get_last_lr()[0]:.2e} seen={seen:,} "
+                  f"lr={opt.param_groups[0]['lr']:.2e} seen={seen:,} "
                   f"({rate:.1f} it/s)", flush=True)
 
         if step % args.eval_every == 0:
@@ -201,20 +210,30 @@ def main() -> int:
                            max_batches=None if full else args.eval_subset_batches)
             tag = "FULL" if full else f"sub({args.eval_subset_batches}b)"
             print(f"[crnn] step {step:7d} val norm_CER[{tag}] = "
-                  f"{cer:.4f}  (best {best_cer:.4f})", flush=True)
-            if cer is not None and cer < best_cer - 1e-4:
-                best_cer = cer
-                no_improve = 0
-                if args.save:
-                    torch.save({"state_dict": model.state_dict(), "opt": opt.state_dict(),
-                                "alphabet": alpha.chars, "args": vars(args), "step": step,
-                                "norm_cer": cer}, args.save)
-            else:
-                no_improve += 1
-                if no_improve >= args.early_stop_patience:
-                    print(f"[crnn] early stop: {no_improve} evals w/o improvement "
-                          f"(best norm_CER={best_cer:.4f} @ seen={seen:,})", flush=True)
-                    break
+                  f"{cer:.4f}  (best {best_cer:.4f}) lr={opt.param_groups[0]['lr']:.2e}",
+                  flush=True)
+            # Only the (deterministic, frequent) SUBSET eval drives LR decay,
+            # best-checkpoint, and early-stop. FULL eval is a logged sanity number
+            # on a different population — mixing it into the same counter is
+            # apples-to-oranges.
+            if cer is not None and not full and step >= args.warmup:
+                plateau.step(cer)
+                if cer < best_cer - 1e-4:
+                    best_cer = cer
+                    no_improve = 0
+                    if args.save:
+                        torch.save({"state_dict": model.state_dict(),
+                                    "opt": opt.state_dict(), "alphabet": alpha.chars,
+                                    "args": vars(args), "step": step, "norm_cer": cer},
+                                   args.save)
+                else:
+                    no_improve += 1
+                    cur_lr = opt.param_groups[0]["lr"]
+                    if cur_lr <= min_lr * 1.001 and no_improve >= args.early_stop_patience:
+                        print(f"[crnn] early stop: LR floored ({cur_lr:.2e}) and "
+                              f"{no_improve} evals w/o improvement "
+                              f"(best norm_CER={best_cer:.4f} @ seen={seen:,})", flush=True)
+                        break
 
         if args.save and step % args.save_every == 0:
             torch.save({"state_dict": model.state_dict(), "opt": opt.state_dict(),

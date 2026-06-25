@@ -15,7 +15,7 @@ Usage::
 
     python3 -m scripts.verify_dataloader \
         --shards '/path/to/shards/shard-*.tar' \
-        --alphabet alphabet.json --eval-threshold 430000 --gap 200
+        --alphabet alphabet.json --val-threshold 434600 --test-threshold 435200 --gap 200
 """
 
 from __future__ import annotations
