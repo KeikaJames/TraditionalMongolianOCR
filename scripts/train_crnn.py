@@ -172,13 +172,22 @@ def main() -> int:
         opt, mode="min", factor=args.lr_decay, patience=args.lr_patience, min_lr=min_lr)
 
     start_step = 0
+    best_cer = float("inf")
+    no_improve = 0
     if args.resume and Path(args.resume).exists():
         ckpt = torch.load(args.resume, map_location=device)
         model.load_state_dict(ckpt["state_dict"])
         if "opt" in ckpt:
             opt.load_state_dict(ckpt["opt"])
+        if "plateau" in ckpt:
+            plateau.load_state_dict(ckpt["plateau"])
         start_step = ckpt.get("step", 0)
-        print(f"[crnn] resumed from {args.resume} @ step {start_step}", flush=True)
+        # Restore early-stop accounting so a resume never overwrites the saved
+        # best checkpoint with a worse model nor resets the patience counter.
+        best_cer = ckpt.get("best_cer", ckpt.get("norm_cer", float("inf")))
+        no_improve = ckpt.get("no_improve", 0)
+        print(f"[crnn] resumed from {args.resume} @ step {start_step} "
+              f"(best_cer={best_cer:.4f}, no_improve={no_improve})", flush=True)
 
     with torch.no_grad():
         probe = torch.zeros(1, 1, args.img_h, args.img_w, device=device)
@@ -187,8 +196,6 @@ def main() -> int:
     print(f"[crnn] device={device} params={n_params/1e6:.2f}M T(frames)={t_frames} "
           f"img={args.img_h}x{args.img_w} batch={args.batch_size}", flush=True)
 
-    best_cer = float("inf")
-    no_improve = 0
     seen = start_step * args.batch_size
     t0 = time.time()
     step = start_step
@@ -243,9 +250,10 @@ def main() -> int:
                     no_improve = 0
                     if args.save:
                         torch.save({"state_dict": model.state_dict(),
-                                    "opt": opt.state_dict(), "alphabet": alpha.chars,
-                                    "args": vars(args), "step": step, "norm_cer": cer},
-                                   args.save)
+                                    "opt": opt.state_dict(), "plateau": plateau.state_dict(),
+                                    "alphabet": alpha.chars, "args": vars(args), "step": step,
+                                    "norm_cer": cer, "best_cer": best_cer,
+                                    "no_improve": no_improve}, args.save)
                 else:
                     no_improve += 1
                     cur_lr = opt.param_groups[0]["lr"]
@@ -256,9 +264,12 @@ def main() -> int:
                         break
 
         if args.save and step % args.save_every == 0:
+            # resumable latest checkpoint — carries early-stop accounting so a
+            # restart from .last continues without clobbering the best model.
             torch.save({"state_dict": model.state_dict(), "opt": opt.state_dict(),
-                        "alphabet": alpha.chars, "args": vars(args), "step": step},
-                       args.save + ".last")
+                        "plateau": plateau.state_dict(), "alphabet": alpha.chars,
+                        "args": vars(args), "step": step, "best_cer": best_cer,
+                        "no_improve": no_improve}, args.save + ".last")
 
     print(f"[crnn] done: step={step} seen={seen:,} best_norm_CER={best_cer:.4f}", flush=True)
     return 0
