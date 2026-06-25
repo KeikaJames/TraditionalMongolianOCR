@@ -30,7 +30,7 @@ import torch
 import torch.nn as nn
 
 from mongocr.alphabet import load as load_alphabet
-from mongocr.data import build_pipeline, list_shards, src_doc_split
+from mongocr.data import build_pipeline, list_shards, src_doc_bands
 from mongocr.losses import ctc_loss
 from mongocr.metrics import ocr_report
 from mongocr.model import CRNN, greedy_decode
@@ -83,8 +83,10 @@ def main() -> int:
     ap.add_argument("--shards", action="append", required=True,
                     help="glob for shard tars (repeatable)")
     ap.add_argument("--alphabet", required=True, help="alphabet.json from build_alphabet")
-    ap.add_argument("--eval-threshold", type=int, required=True,
-                    help="src_doc >= this -> eval; < this-gap -> train")
+    ap.add_argument("--val-threshold", type=int, required=True,
+                    help="val = val_threshold <= src_doc < test_threshold-gap")
+    ap.add_argument("--test-threshold", type=int, required=True,
+                    help="test = src_doc >= test_threshold (reserved, untouched here)")
     ap.add_argument("--gap", type=int, default=200, help="src_doc gap band dropped")
     ap.add_argument("--steps", type=int, default=2_000_000, help="max optimizer steps")
     ap.add_argument("--eval-every", type=int, default=2000)
@@ -121,13 +123,17 @@ def main() -> int:
         raise SystemExit(f"no shards matched: {args.shards}")
     print(f"[crnn] {len(shard_urls)} shards", flush=True)
 
-    is_train, is_eval = src_doc_split(args.eval_threshold, args.gap)
+    is_train, is_val, _is_test = src_doc_bands(
+        args.val_threshold, args.test_threshold, args.gap)
+    print(f"[crnn] split: train src_doc<{args.val_threshold - args.gap} | "
+          f"val [{args.val_threshold},{args.test_threshold - args.gap}) | "
+          f"test src_doc>={args.test_threshold} (reserved)", flush=True)
     train_loader = make_loader(shard_urls, alpha, is_train, img_h=args.img_h,
                                img_w=args.img_w, batch_size=args.batch_size,
                                num_workers=args.num_workers, training=True)
 
     def eval_loader():
-        return make_loader(shard_urls, alpha, is_eval, img_h=args.img_h,
+        return make_loader(shard_urls, alpha, is_val, img_h=args.img_h,
                            img_w=args.img_w, batch_size=args.batch_size,
                            num_workers=max(2, args.num_workers // 2), training=False)
 
@@ -194,7 +200,7 @@ def main() -> int:
             cer = evaluate(model, eval_loader(), blank, alpha.chars, device,
                            max_batches=None if full else args.eval_subset_batches)
             tag = "FULL" if full else f"sub({args.eval_subset_batches}b)"
-            print(f"[crnn] step {step:7d} held-out norm_CER[{tag}] = "
+            print(f"[crnn] step {step:7d} val norm_CER[{tag}] = "
                   f"{cer:.4f}  (best {best_cer:.4f})", flush=True)
             if cer is not None and cer < best_cer - 1e-4:
                 best_cer = cer

@@ -28,7 +28,7 @@ import torch
 
 from mongocr.alphabet import load as load_alphabet
 from mongocr.data import (build_pipeline, key_pipeline, keys_of, list_shards,
-                          src_doc_split)
+                          src_doc_bands)
 from mongocr.model import CRNN
 
 
@@ -36,7 +36,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--shards", action="append", required=True)
     ap.add_argument("--alphabet", required=True)
-    ap.add_argument("--eval-threshold", type=int, required=True)
+    ap.add_argument("--val-threshold", type=int, required=True)
+    ap.add_argument("--test-threshold", type=int, required=True)
     ap.add_argument("--gap", type=int, default=200)
     ap.add_argument("--img-h", type=int, default=1024)
     ap.add_argument("--img-w", type=int, default=64)
@@ -51,7 +52,8 @@ def main() -> int:
         raise SystemExit(f"no shards matched: {args.shards}")
     print(f"[verify] {len(shard_urls)} shards, alphabet={len(alpha.chars)} "
           f"sha256={alpha.sha256[:12]}", flush=True)
-    is_train, is_eval = src_doc_split(args.eval_threshold, args.gap)
+    is_train, is_val, is_test = src_doc_bands(args.val_threshold, args.test_threshold,
+                                              args.gap)
 
     # 1. index-0 / sample decode preview --------------------------------------
     import webdataset as wds
@@ -109,20 +111,20 @@ def main() -> int:
           f"duplicates={dup} -> {'OK no dup' if dup == 0 else 'FAIL duplicates'}",
           flush=True)
 
-    # 5. src_doc disjointness --------------------------------------------------
-    train_docs, eval_docs = set(), set()
-    for _k, sd, _t, _f in keys_of(shard_urls, is_train, limit=args.window):
-        train_docs.add(sd)
-    for _k, sd, _t, _f in keys_of(shard_urls, is_eval, limit=args.window):
-        eval_docs.add(sd)
-    inter = train_docs & eval_docs
-    print(f"\n[verify] src_doc: train[min={min(train_docs, default=-1)},"
-          f"max={max(train_docs, default=-1)}] "
-          f"eval[min={min(eval_docs, default=-1)},max={max(eval_docs, default=-1)}] "
-          f"intersection={len(inter)} -> {'OK disjoint' if not inter else 'FAIL leak'}",
-          flush=True)
+    # 5. train/val/test src_doc disjointness -----------------------------------
+    docs = {}
+    for name, pred in (("train", is_train), ("val", is_val), ("test", is_test)):
+        s = {sd for _k, sd, _t, _f in keys_of(shard_urls, pred, limit=args.window)}
+        docs[name] = s
+        print(f"\n[verify] {name:5s} src_doc: n={len(s)} "
+              f"[min={min(s, default=-1)},max={max(s, default=-1)}]", flush=True)
+    leaks = {f"{a}&{b}": len(docs[a] & docs[b])
+             for a, b in (("train", "val"), ("train", "test"), ("val", "test"))}
+    no_leak = all(v == 0 for v in leaks.values())
+    print(f"[verify] pairwise intersections {leaks} -> "
+          f"{'OK disjoint' if no_leak else 'FAIL leak'}", flush=True)
 
-    ok = ok_tu and dup == 0 and not inter
+    ok = ok_tu and dup == 0 and no_leak
     print(f"\n[verify] {'ALL PASS' if ok else 'FAILURES PRESENT'}", flush=True)
     return 0 if ok else 1
 

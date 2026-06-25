@@ -21,7 +21,7 @@ from pathlib import Path
 import torch
 
 from mongocr.alphabet import load as load_alphabet
-from mongocr.data import build_pipeline, list_shards, src_doc_split
+from mongocr.data import build_pipeline, list_shards, src_doc_bands
 from mongocr.metrics import ocr_report
 from mongocr.model import CRNN, greedy_decode
 
@@ -31,8 +31,11 @@ def main() -> int:
     ap.add_argument("--shards", action="append", required=True)
     ap.add_argument("--alphabet", required=True)
     ap.add_argument("--ckpt", required=True)
-    ap.add_argument("--eval-threshold", type=int, required=True)
+    ap.add_argument("--val-threshold", type=int, required=True)
+    ap.add_argument("--test-threshold", type=int, required=True)
     ap.add_argument("--gap", type=int, default=200)
+    ap.add_argument("--split", choices=["val", "test"], default="test",
+                    help="which held-out split to score (default: test = headline)")
     ap.add_argument("--img-h", type=int, default=1024)
     ap.add_argument("--img-w", type=int, default=64)
     ap.add_argument("--lstm-hidden", type=int, default=384)
@@ -47,7 +50,10 @@ def main() -> int:
               else torch.device("cpu"))
     alpha = load_alphabet(Path(args.alphabet))
     shard_urls = list_shards(*args.shards)
-    _, is_eval = src_doc_split(args.eval_threshold, args.gap)
+    _is_train, is_val, is_test = src_doc_bands(args.val_threshold, args.test_threshold,
+                                               args.gap)
+    is_eval = is_test if args.split == "test" else is_val
+    print(f"[eval] scoring {args.split.upper()} split", flush=True)
 
     model = CRNN(alpha.n_classes, lstm_hidden=args.lstm_hidden).to(device)
     ckpt = torch.load(args.ckpt, map_location=device)

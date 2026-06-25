@@ -46,9 +46,11 @@ Line strips are packed into WebDataset tar shards; each sample is a
 ```
 
 `text` is the nominal-Unicode training label. `src_doc` is the source document
-id, used for a **document-level** train/eval split (no adjacent-line leakage):
-eval = `src_doc >= threshold`, train = `src_doc < threshold - gap`, with a gap
-band dropped so a document straddling a shard boundary cannot leak.
+id, used for a **document-level** train/val/test split (no adjacent-line
+leakage): test = `src_doc >= test_threshold`, val = `[val_threshold,
+test_threshold - gap)`, train = `src_doc < val_threshold - gap`. Gap bands are
+dropped between splits so a document straddling a shard boundary cannot leak.
+Early stopping selects on val; the headline CER is reported once on test.
 
 ## Charset curation & data cleaning
 
@@ -72,18 +74,19 @@ python3 -m scripts.build_alphabet --meta /path/to/meta.jsonl --out alphabet.json
 # 2) verify the dataloader before any scaled run
 python3 -m scripts.verify_dataloader \
     --shards '/path/to/shards/shard-*.tar' \
-    --alphabet alphabet.json --eval-threshold 430000 --gap 200
+    --alphabet alphabet.json --val-threshold 431718 --test-threshold 433718 --gap 200
 
-# 3) train (streams all shards; >=1 epoch coverage, CER early stop)
+# 3) train (streams all shards; >=1 epoch coverage, val-CER early stop)
 python3 -m scripts.train_crnn \
     --shards '/path/to/shards/shard-*.tar' \
-    --alphabet alphabet.json --eval-threshold 430000 --gap 200 \
+    --alphabet alphabet.json --val-threshold 431718 --test-threshold 433718 --gap 200 \
     --batch-size 64 --device cuda --save crnn.pt
 
-# 4) evaluate a checkpoint
+# 4) evaluate a checkpoint on the untouched test split
 python3 -m scripts.eval_crnn \
     --shards '/path/to/shards/shard-*.tar' \
-    --alphabet alphabet.json --ckpt crnn.pt --eval-threshold 430000
+    --alphabet alphabet.json --ckpt crnn.pt \
+    --val-threshold 431718 --test-threshold 433718 --split test
 ```
 
 ## CER yardstick

@@ -113,7 +113,7 @@ def list_shards(*patterns: str) -> list[str]:
 
 
 def src_doc_split(threshold: int, gap: int = 200) -> tuple[Callable, Callable]:
-    """Return (is_train, is_eval) predicates over ``src_doc``.
+    """Return (is_train, is_eval) predicates over ``src_doc`` (two-way).
 
     eval  : src_doc >= threshold
     train : src_doc <  threshold - gap   (a gap band is dropped from both so a
@@ -126,6 +126,34 @@ def src_doc_split(threshold: int, gap: int = 200) -> tuple[Callable, Callable]:
         return src_doc >= threshold
 
     return is_train, is_eval
+
+
+def src_doc_bands(
+    val_threshold: int, test_threshold: int, gap: int = 200
+) -> tuple[Callable, Callable, Callable]:
+    """Return (is_train, is_val, is_test) predicates for a document-level
+    train/val/test split (``val_threshold < test_threshold``). Gap bands are
+    dropped between adjacent splits so a src_doc straddling a shard boundary can
+    never leak. Early-stop selects on val; the headline CER is reported once on
+    the untouched test set.
+
+        test  : src_doc >= test_threshold
+        val   : val_threshold <= src_doc < test_threshold - gap
+        train : src_doc < val_threshold - gap
+    """
+    if not val_threshold < test_threshold:
+        raise ValueError("need val_threshold < test_threshold")
+
+    def is_train(src_doc: int) -> bool:
+        return src_doc < val_threshold - gap
+
+    def is_val(src_doc: int) -> bool:
+        return val_threshold <= src_doc < test_threshold - gap
+
+    def is_test(src_doc: int) -> bool:
+        return src_doc >= test_threshold
+
+    return is_train, is_val, is_test
 
 
 # --------------------------------------------------------------------------- #
@@ -243,5 +271,6 @@ __all__ = [
     "key_pipeline",
     "keys_of",
     "list_shards",
+    "src_doc_bands",
     "src_doc_split",
 ]

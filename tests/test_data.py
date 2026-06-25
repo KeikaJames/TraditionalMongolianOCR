@@ -18,7 +18,7 @@ except Exception:
 if HAVE_DEPS:
     from mongocr.alphabet import from_counts
     from mongocr.data import (build_pipeline, collate, decode_image, ink_crop,
-                              keys_of, list_shards, src_doc_split)
+                              keys_of, list_shards, src_doc_bands, src_doc_split)
     from collections import Counter
 
 
@@ -85,6 +85,15 @@ class TestData(unittest.TestCase):
         keys = [k for k, _sd, _t, _f in keys_of(self.shards)]
         self.assertEqual(len(keys), len(set(keys)))
         self.assertEqual(len(keys), 4)
+
+    def test_src_doc_bands_three_way_disjoint(self):
+        is_tr, is_va, is_te = src_doc_bands(val_threshold=100, test_threshold=200, gap=10)
+        self.assertTrue(is_tr(50)); self.assertFalse(is_va(50)); self.assertFalse(is_te(50))
+        self.assertTrue(is_va(150)); self.assertFalse(is_tr(150)); self.assertFalse(is_te(150))
+        self.assertTrue(is_te(250)); self.assertFalse(is_tr(250)); self.assertFalse(is_va(250))
+        # gap bands belong to nobody
+        self.assertFalse(is_tr(95) or is_va(95))      # [90,100) train-val gap
+        self.assertFalse(is_va(195) or is_te(195))    # [190,200) val-test gap
 
     def test_keys_of_yields_font(self):
         fonts = {f for _k, _sd, _t, f in keys_of(self.shards)}
