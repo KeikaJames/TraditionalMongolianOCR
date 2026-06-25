@@ -208,10 +208,14 @@ def main() -> int:
             full = step % args.full_eval_every == 0
             cer = evaluate(model, eval_loader(), blank, alpha.chars, device,
                            max_batches=None if full else args.eval_subset_batches)
-            tag = "FULL" if full else f"sub({args.eval_subset_batches}b)"
-            print(f"[crnn] step {step:7d} val norm_CER[{tag}] = "
-                  f"{cer:.4f}  (best {best_cer:.4f}) lr={opt.param_groups[0]['lr']:.2e}",
-                  flush=True)
+            if cer is None:
+                print(f"[crnn] step {step:7d} val eval returned no samples — "
+                      f"skipping (check val band populates these shards)", flush=True)
+            else:
+                tag = "FULL" if full else f"sub({args.eval_subset_batches}b)"
+                print(f"[crnn] step {step:7d} val norm_CER[{tag}] = "
+                      f"{cer:.4f}  (best {best_cer:.4f}) "
+                      f"lr={opt.param_groups[0]['lr']:.2e}", flush=True)
             # Only the (deterministic, frequent) SUBSET eval drives LR decay,
             # best-checkpoint, and early-stop. FULL eval is a logged sanity number
             # on a different population — mixing it into the same counter is
