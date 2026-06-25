@@ -43,7 +43,7 @@ def main() -> int:
     ap.add_argument("--img-w", type=int, default=64)
     ap.add_argument("--lstm-hidden", type=int, default=384)
     ap.add_argument("--window", type=int, default=2000, help="samples to inspect")
-    ap.add_argument("--tail-shards", type=int, default=15,
+    ap.add_argument("--tail-shards", type=int, default=40,
                     help="how many last shards to scan for val/test populate check")
     ap.add_argument("--num-workers", type=int, default=4)
     args = ap.parse_args()

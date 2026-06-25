@@ -73,6 +73,9 @@ def main() -> int:
     ap.add_argument("--tail", type=int, default=40,
                     help="scan only the last N source shards (where val/test live)")
     ap.add_argument("--out-dir", required=True)
+    ap.add_argument("--alphabet", required=True,
+                    help="alphabet.json; OOV lines are dropped here too so the "
+                         "cached eval set equals the population eval actually scores")
     ap.add_argument("--val-threshold", type=int, required=True)
     ap.add_argument("--test-threshold", type=int, required=True)
     ap.add_argument("--gap", type=int, default=200)
@@ -80,13 +83,16 @@ def main() -> int:
     args = ap.parse_args()
 
     import webdataset as wds
+    from mongocr.alphabet import load as load_alphabet
 
+    alpha = load_alphabet(Path(args.alphabet))
     shards = list_shards(*args.src)[-args.tail:]
     if not shards:
         raise SystemExit("no source shards matched")
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"[extract] scanning {len(shards)} tail shards -> {out_dir}", flush=True)
+    print(f"[extract] scanning {len(shards)} tail shards -> {out_dir} "
+          f"(alphabet {len(alpha.chars)} chars, OOV lines dropped)", flush=True)
 
     _is_train, is_val, is_test = src_doc_bands(args.val_threshold, args.test_threshold, args.gap)
     val_w = RollingTar(out_dir, "val", args.per_shard)
@@ -97,6 +103,9 @@ def main() -> int:
         wds.tarfile_to_samples(handler=wds.warn_and_continue),
     )
     seen = 0
+    window_min_sd = None                 # lowest src_doc anywhere in the scanned window
+    vmin = vmax = tmin = tmax = None
+    vdocs, tdocs = set(), set()
     for s in pipe:
         if "json" not in s or "png" not in s:
             continue
@@ -105,10 +114,18 @@ def main() -> int:
             sd = int(meta["src_doc"])
         except (json.JSONDecodeError, KeyError, ValueError):
             continue
+        window_min_sd = sd if window_min_sd is None else min(window_min_sd, sd)
+        # same OOV-drop policy as the eval loader, so cached == scored population
+        if not alpha.covers(meta["text"]):
+            continue
         if is_val(sd):
             val_w.add(s["__key__"], s["png"], meta)
+            vmin = sd if vmin is None else min(vmin, sd); vmax = sd if vmax is None else max(vmax, sd)
+            vdocs.add(sd)
         elif is_test(sd):
             test_w.add(s["__key__"], s["png"], meta)
+            tmin = sd if tmin is None else min(tmin, sd); tmax = sd if tmax is None else max(tmax, sd)
+            tdocs.add(sd)
         seen += 1
         if seen % 200000 == 0:
             print(f"[extract] scanned {seen:,}; val={val_w.total:,} test={test_w.total:,}",
@@ -116,8 +133,24 @@ def main() -> int:
 
     val_w.close()
     test_w.close()
-    print(f"[extract] DONE: val={val_w.total:,} samples ({val_w.idx + 1} shards) "
-          f"test={test_w.total:,} samples ({test_w.idx + 1} shards)", flush=True)
+    print(f"[extract] DONE: val={val_w.total:,} samples / {len(vdocs)} docs "
+          f"[{vmin},{vmax}] ({val_w.idx + 1} shards); "
+          f"test={test_w.total:,} samples / {len(tdocs)} docs [{tmin},{tmax}] "
+          f"({test_w.idx + 1} shards); window_min_src_doc={window_min_sd}", flush=True)
+
+    # Coverage guard: the scan window must open BELOW the val floor, which proves
+    # the contiguous high-src_doc tail spans the entire val+test range (nothing
+    # below the floor was left in un-scanned earlier shards). Without this a too-
+    # small --tail silently truncates the eval set and the early-stop CER is wrong.
+    if val_w.total == 0 or test_w.total == 0:
+        raise SystemExit(f"[extract] FAIL: empty band (val={val_w.total} test={test_w.total}); "
+                         f"check thresholds / increase --tail")
+    if window_min_sd is None or window_min_sd >= args.val_threshold:
+        raise SystemExit(
+            f"[extract] FAIL: window_min_src_doc={window_min_sd} did not open below "
+            f"val_threshold={args.val_threshold} — tail too small, val/test may be "
+            f"truncated. Increase --tail and rerun.")
+    print("[extract] coverage guard PASS (window opened below val floor)", flush=True)
     return 0
 
 
