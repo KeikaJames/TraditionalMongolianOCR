@@ -43,6 +43,8 @@ def main() -> int:
     ap.add_argument("--img-w", type=int, default=64)
     ap.add_argument("--lstm-hidden", type=int, default=384)
     ap.add_argument("--window", type=int, default=2000, help="samples to inspect")
+    ap.add_argument("--tail-shards", type=int, default=15,
+                    help="how many last shards to scan for val/test populate check")
     ap.add_argument("--num-workers", type=int, default=4)
     args = ap.parse_args()
 
@@ -111,20 +113,33 @@ def main() -> int:
           f"duplicates={dup} -> {'OK no dup' if dup == 0 else 'FAIL duplicates'}",
           flush=True)
 
-    # 5. train/val/test src_doc disjointness -----------------------------------
-    docs = {}
-    for name, pred in (("train", is_train), ("val", is_val), ("test", is_test)):
-        s = {sd for _k, sd, _t, _f in keys_of(shard_urls, pred, limit=args.window)}
-        docs[name] = s
-        print(f"\n[verify] {name:5s} src_doc: n={len(s)} "
-              f"[min={min(s, default=-1)},max={max(s, default=-1)}]", flush=True)
-    leaks = {f"{a}&{b}": len(docs[a] & docs[b])
-             for a, b in (("train", "val"), ("train", "test"), ("val", "test"))}
-    no_leak = all(v == 0 for v in leaks.values())
-    print(f"[verify] pairwise intersections {leaks} -> "
-          f"{'OK disjoint' if no_leak else 'FAIL leak'}", flush=True)
+    # 5. val/test populate + ranges (single pass over the tail shards) ---------
+    # Predicate disjointness for ALL integers is proven in tests (src_doc_bands);
+    # train non-emptiness + plumbing is proven above on the shard-0 stream. Here
+    # we confirm on real data that val/test actually populate and sit in the
+    # expected high-src_doc range. val/test live only in the last shards, so we
+    # read the tail once (reading from shard-0 would stream the whole corpus).
+    tail = shard_urls[-args.tail_shards:]
+    tr = va = 0
+    vset, tset, gap_n = set(), set(), 0
+    for _k, sd, _t, _f in keys_of(tail):
+        if is_train(sd):
+            tr += 1
+        elif is_val(sd):
+            va += 1; vset.add(sd)
+        elif is_test(sd):
+            tset.add(sd)
+        else:
+            gap_n += 1
+    print(f"\n[verify] tail {len(tail)} shards: train_samples={tr} "
+          f"val_samples={va} val_docs={len(vset)} "
+          f"[{min(vset, default=-1)},{max(vset, default=-1)}] "
+          f"test_docs={len(tset)} [{min(tset, default=-1)},{max(tset, default=-1)}] "
+          f"gap_dropped={gap_n}", flush=True)
+    bands_ok = bool(vset) and bool(tset)
+    print(f"[verify] val & test non-empty: {'OK' if bands_ok else 'FAIL'}", flush=True)
 
-    ok = ok_tu and dup == 0 and no_leak
+    ok = ok_tu and dup == 0 and bands_ok
     print(f"\n[verify] {'ALL PASS' if ok else 'FAILURES PRESENT'}", flush=True)
     return 0 if ok else 1
 
