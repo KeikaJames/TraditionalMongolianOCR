@@ -82,7 +82,9 @@ def decode_image(png_bytes: bytes, img_h: int, img_w: int) -> torch.Tensor:
     img = Image.open(io.BytesIO(png_bytes)).convert("L")
     img = ink_crop(img)
     img = img.resize((img_w, img_h), Image.BILINEAR)
-    x = torch.from_numpy(_to_array(img)).float() / 255.0
+    # .copy() -> writable array (PIL's buffer is read-only; silences the
+    # non-writable-tensor warning; values are unchanged).
+    x = torch.from_numpy(_to_array(img).copy()).float() / 255.0
     x = 1.0 - x          # ink high, paper low
     return x.unsqueeze(0)  # [1, H, W]
 
