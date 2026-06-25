@@ -13,10 +13,10 @@ Usage (from repo root)::
 
     python3 -m scripts.train_crnn \
         --shards '/path/to/image2text/shards/shard-*.tar' \
-        --shards '/path/to/image2text/hanshi_shards/shard-*.tar' \
+        --eval-shards '/local/eval_cache/val-*.tar' \
         --alphabet alphabet.json \
         --val-threshold 434600 --test-threshold 435200 --gap 200 \
-        --batch-size 64 --device cuda --save crnn.pt
+        --batch-size 128 --device cuda --save crnn.pt
 """
 
 from __future__ import annotations
@@ -87,6 +87,10 @@ def main() -> int:
     ap.add_argument("--test-threshold", type=int, required=True,
                     help="test = src_doc >= test_threshold (reserved, untouched here)")
     ap.add_argument("--gap", type=int, default=200, help="src_doc gap band dropped")
+    ap.add_argument("--eval-shards", action="append", default=None,
+                    help="dedicated val shards (from extract_eval_shards) read for "
+                         "evaluation; STRONGLY recommended — without it eval filters "
+                         "the full corpus and streams every shard to find the val band")
     ap.add_argument("--steps", type=int, default=2_000_000, help="max optimizer steps")
     ap.add_argument("--eval-every", type=int, default=2000)
     ap.add_argument("--eval-subset-batches", type=int, default=120,
@@ -136,8 +140,20 @@ def main() -> int:
                                img_w=args.img_w, batch_size=args.batch_size,
                                num_workers=args.num_workers, training=True)
 
+    # Eval reads dedicated val shards if given (fast: only val data, no filtering
+    # over the full corpus). Falls back to filtering the main shards otherwise.
+    if args.eval_shards:
+        eval_shard_urls = list_shards(*args.eval_shards)
+        if not eval_shard_urls:
+            raise SystemExit(f"no eval shards matched: {args.eval_shards}")
+        print(f"[crnn] eval reads {len(eval_shard_urls)} dedicated val shards", flush=True)
+    else:
+        eval_shard_urls = shard_urls
+        print("[crnn] WARNING: no --eval-shards; eval will filter the full corpus "
+              "(slow). Use extract_eval_shards.", flush=True)
+
     def eval_loader():
-        return make_loader(shard_urls, alpha, is_val, img_h=args.img_h,
+        return make_loader(eval_shard_urls, alpha, is_val, img_h=args.img_h,
                            img_w=args.img_w, batch_size=args.batch_size,
                            num_workers=max(2, args.num_workers // 2), training=False)
 

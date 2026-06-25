@@ -76,15 +76,23 @@ python3 -m scripts.verify_dataloader \
     --shards '/path/to/shards/shard-*.tar' \
     --alphabet alphabet.json --val-threshold 431718 --test-threshold 433718 --gap 200
 
-# 3) train (streams all shards; >=1 epoch coverage, val-CER early stop)
+# 3) extract val/test into small local shards (one-time; the val/test src_doc
+#    bands live only in the last source shards, so copy them out once for fast
+#    eval instead of streaming the whole corpus to find them every evaluation)
+python3 -m scripts.extract_eval_shards \
+    --src '/path/to/shards/shard-*.tar' --tail 40 --out-dir /local/eval_cache \
+    --val-threshold 431718 --test-threshold 433718 --gap 200
+
+# 4) train (streams all shards for train; evaluates on the local val shards)
 python3 -m scripts.train_crnn \
     --shards '/path/to/shards/shard-*.tar' \
+    --eval-shards '/local/eval_cache/val-*.tar' \
     --alphabet alphabet.json --val-threshold 431718 --test-threshold 433718 --gap 200 \
-    --batch-size 64 --device cuda --save crnn.pt
+    --batch-size 128 --device cuda --save crnn.pt
 
-# 4) evaluate a checkpoint on the untouched test split
+# 5) evaluate a checkpoint on the untouched test split (local test shards)
 python3 -m scripts.eval_crnn \
-    --shards '/path/to/shards/shard-*.tar' \
+    --shards '/local/eval_cache/test-*.tar' \
     --alphabet alphabet.json --ckpt crnn.pt \
     --val-threshold 431718 --test-threshold 433718 --split test
 ```
