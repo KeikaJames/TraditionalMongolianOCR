@@ -99,6 +99,15 @@ class TestData(unittest.TestCase):
         imgs, padded, lengths = batches[0]
         self.assertEqual(imgs.shape[1:], (1, 64, 32))
 
+    def test_pipeline_drops_oov_lines(self):
+        # alphabet missing 'ᠥ' -> the shard-1 samples (text "ᠣᠤᠥ") must be dropped,
+        # leaving only the 2 shard-0 samples (text "ᠠᠡᠢ").
+        alpha = from_counts(Counter("ᠠᠡᠢᠣᠤ"))  # no 'ᠥ'
+        pipe = build_pipeline(self.shards, alpha, img_h=64, img_w=32,
+                              batch_size=1, training=False)
+        n = sum(int(b[0].shape[0]) for b in pipe)
+        self.assertEqual(n, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

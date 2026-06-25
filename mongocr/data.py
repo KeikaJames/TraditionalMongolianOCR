@@ -158,9 +158,14 @@ def build_pipeline(
         return {"png": sample["png"], "meta": meta, "key": sample["__key__"]}
 
     def keep(sample):
-        if keep_src_doc is None:
-            return True
-        return keep_src_doc(int(sample["meta"]["src_doc"]))
+        meta = sample["meta"]
+        if keep_src_doc is not None and not keep_src_doc(int(meta["src_doc"])):
+            return False
+        # Drop lines whose label has an out-of-vocab char: the rendered image
+        # still contains that glyph, so we cannot supervise it — keeping the line
+        # (with the char silently dropped from the target) would teach the model
+        # to skip glyphs. Curate the alphabet, then drop uncovered lines.
+        return alpha.covers(meta["text"])
 
     def to_tensors(sample):
         x = decode_image(sample["png"], img_h, img_w)

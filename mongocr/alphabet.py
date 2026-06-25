@@ -32,8 +32,16 @@ class Alphabet:
     def n_classes(self) -> int:
         return len(self.chars) + 1
 
+    def covers(self, text: str) -> bool:
+        """True iff every character of ``text`` is in the vocab. Lines that are
+        not covered are dropped from training (do NOT silently strip OOV chars —
+        the rendered image still shows that glyph, so stripping desyncs the
+        image from its label)."""
+        return all(c in self.stoi for c in text)
+
     def encode(self, text: str) -> list[int]:
-        """Map a label to character ids, dropping any code point not in vocab."""
+        """Map an in-vocab label to character ids. Call only on ``covers(text)``
+        text; any stray OOV char is skipped as a defensive fallback."""
         return [self.stoi[c] for c in text if c in self.stoi]
 
 
@@ -58,13 +66,19 @@ def scan_labels(meta_paths: list[Path]) -> Counter:
     return counts
 
 
-def from_counts(counts: Counter) -> Alphabet:
-    chars = sorted(counts, key=ord)
+def from_counts(counts: Counter, min_count: int = 1) -> Alphabet:
+    """Build the alphabet from per-char counts, keeping only characters that
+    occur at least ``min_count`` times. Curation drops the noise tail (hapax
+    codepoints: stray emoji, foreign-script artifacts, scanning junk) so they do
+    not become dead CTC classes; lines containing a dropped character are removed
+    from training upstream (the rendered glyph would otherwise have no label)."""
+    chars = sorted((c for c, n in counts.items() if n >= min_count), key=ord)
     stoi = {c: i for i, c in enumerate(chars)}
     return Alphabet(chars=chars, stoi=stoi, sha256=_hash(chars))
 
 
-def save(alpha: Alphabet, path: Path, *, source: str = "", n_labels: int = 0) -> None:
+def save(alpha: Alphabet, path: Path, *, source: str = "", n_labels: int = 0,
+         min_count: int = 1) -> None:
     """Write the frozen vocab. Counts/histogram are NOT written here (kept as a
     separate local QA artifact) so the committed file leaks no corpus statistics."""
     path = Path(path)
@@ -75,6 +89,7 @@ def save(alpha: Alphabet, path: Path, *, source: str = "", n_labels: int = 0) ->
                 "sha256": alpha.sha256,
                 "n_chars": len(alpha.chars),
                 "blank": alpha.blank,
+                "min_count": min_count,
                 "source": source,
                 "n_labels_scanned": n_labels,
             },

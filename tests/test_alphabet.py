@@ -17,9 +17,19 @@ class TestAlphabet(unittest.TestCase):
         self.assertEqual(alpha.blank, 3)
         self.assertEqual(alpha.n_classes, 4)
 
+    def test_min_count_curation(self):
+        counts = Counter({"a": 100, "b": 50, "x": 2, "🍏": 1})  # x,emoji are noise
+        alpha = from_counts(counts, min_count=10)
+        self.assertEqual(alpha.chars, ["a", "b"])  # noise tail dropped
+
+    def test_covers(self):
+        alpha = from_counts(Counter("abc"))
+        self.assertTrue(alpha.covers("abc"))
+        self.assertFalse(alpha.covers("abz"))  # 'z' OOV -> line should be dropped
+
     def test_encode_drops_oov(self):
         alpha = from_counts(Counter("abc"))
-        self.assertEqual(alpha.encode("abz"), [0, 1])  # 'z' not in vocab -> dropped
+        self.assertEqual(alpha.encode("abz"), [0, 1])  # defensive fallback
 
     def test_save_load_roundtrip_and_sha(self):
         alpha = from_counts(Counter("ᠠᠡabc "))

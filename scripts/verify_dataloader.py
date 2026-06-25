@@ -72,12 +72,18 @@ def main() -> int:
         if seen >= args.window:
             break
 
-    # 2. font coverage ---------------------------------------------------------
+    # 2. font coverage + OOV-drop rate -----------------------------------------
     fonts = Counter()
-    for _k, _sd, _txt, font in keys_of(shard_urls, is_train, limit=args.window):
+    oov = scanned = 0
+    for _k, _sd, txt, font in keys_of(shard_urls, is_train, limit=args.window):
         fonts[font] += 1
-    print(f"\n[verify] fonts in first {args.window} train samples: {dict(fonts)}",
+        scanned += 1
+        if not alpha.covers(txt):
+            oov += 1
+    print(f"\n[verify] fonts in first {scanned} train samples: {dict(fonts)}",
           flush=True)
+    print(f"[verify] OOV lines (would be dropped): {oov}/{scanned} "
+          f"({100*oov/max(scanned,1):.3f}%)", flush=True)
 
     # 3. T >= U ----------------------------------------------------------------
     model = CRNN(alpha.n_classes, lstm_hidden=args.lstm_hidden)

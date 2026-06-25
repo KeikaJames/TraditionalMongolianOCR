@@ -50,6 +50,17 @@ id, used for a **document-level** train/eval split (no adjacent-line leakage):
 eval = `src_doc >= threshold`, train = `src_doc < threshold - gap`, with a gap
 band dropped so a document straddling a shard boundary cannot leak.
 
+## Charset curation & data cleaning
+
+Web-scraped Mongolian text carries a long noise tail of stray code points (stray
+emoji, foreign-script fragments, box-drawing, hapax CJK). The alphabet is curated
+by a frequency floor (`build_alphabet --min-count`, default 10): characters
+seen fewer than that across the whole corpus are dropped rather than turned into
+dead CTC classes. A **line containing any dropped character is removed from
+training** — the rendered image still shows that glyph, so keeping the line and
+silently dropping the char from the target would teach the model to skip glyphs.
+At `--min-count 10` the dropped code points are < 0.001% of all occurrences.
+
 ## Usage
 
 ```bash

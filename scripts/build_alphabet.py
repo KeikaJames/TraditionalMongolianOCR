@@ -30,21 +30,36 @@ def main() -> int:
     ap.add_argument("--meta", action="append", required=True,
                     help="meta.jsonl path (repeatable; all are scanned in full)")
     ap.add_argument("--out", default="alphabet.json")
+    ap.add_argument("--min-count", type=int, default=10,
+                    help="keep only characters occurring >= this many times; "
+                         "lines containing a dropped char are removed in training")
     ap.add_argument("--counts", default="",
                     help="optional path for the per-char count QA artifact "
                          "(default: <out>.counts.json, git-ignored)")
+    ap.add_argument("--counts-in", default="",
+                    help="reuse an existing *.counts.json instead of rescanning")
     args = ap.parse_args()
 
-    meta_paths = [Path(m) for m in args.meta]
-    for mp in meta_paths:
-        if not mp.exists():
-            raise SystemExit(f"meta not found: {mp}")
+    if args.counts_in:
+        from collections import Counter
+        raw = json.loads(Path(args.counts_in).read_text(encoding="utf-8"))
+        counts = Counter({v[0]: v[1] for v in raw.values()})
+        print(f"[alphabet] reusing counts from {args.counts_in}", flush=True)
+    else:
+        meta_paths = [Path(m) for m in args.meta]
+        for mp in meta_paths:
+            if not mp.exists():
+                raise SystemExit(f"meta not found: {mp}")
+        print(f"[alphabet] scanning {len(meta_paths)} meta file(s) in full ...", flush=True)
+        counts = scan_labels(meta_paths)
 
-    print(f"[alphabet] scanning {len(meta_paths)} meta file(s) in full ...", flush=True)
-    counts = scan_labels(meta_paths)
     total = sum(counts.values())
-    alpha = from_counts(counts)
-    save(alpha, Path(args.out), source=",".join(map(str, meta_paths)), n_labels=total)
+    alpha = from_counts(counts, min_count=args.min_count)
+    dropped = sorted((c for c, n in counts.items() if n < args.min_count),
+                     key=lambda c: -counts[c])
+    dropped_occ = sum(counts[c] for c in dropped)
+    save(alpha, Path(args.out), source=",".join(args.meta), n_labels=total,
+         min_count=args.min_count)
 
     counts_path = Path(args.counts) if args.counts else Path(str(args.out) + ".counts.json")
     counts_path.write_text(
@@ -53,14 +68,15 @@ def main() -> int:
         encoding="utf-8",
     )
 
-    print(f"[alphabet] chars={len(alpha.chars)} (+blank={alpha.blank}) "
-          f"sha256={alpha.sha256[:12]} total_codepoints={total:,}", flush=True)
+    print(f"[alphabet] kept={len(alpha.chars)} (+blank={alpha.blank}) "
+          f"sha256={alpha.sha256[:12]} min_count={args.min_count}", flush=True)
+    print(f"[alphabet] dropped {len(dropped)} chars as noise "
+          f"({dropped_occ:,}/{total:,} = {100*dropped_occ/max(total,1):.5f}% of codepoints)",
+          flush=True)
     print(f"[alphabet] wrote {args.out} ; counts QA -> {counts_path}", flush=True)
-    # QA: show the codepoint range and a few rarest chars to eyeball for junk.
-    rarest = counts.most_common()[-15:]
-    print("[alphabet] 15 rarest code points (eyeball for junk):", flush=True)
-    for c, n in rarest:
-        print(f"    U+{ord(c):04X} {c!r}  x{n}", flush=True)
+    print("[alphabet] sample of dropped (kept out of vocab):", flush=True)
+    for c in dropped[:20]:
+        print(f"    U+{ord(c):04X} {c!r}  x{counts[c]}", flush=True)
     return 0
 
 
