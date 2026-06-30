@@ -97,6 +97,26 @@ python3 -m scripts.eval_crnn \
     --val-threshold 434600 --test-threshold 435200 --split test
 ```
 
+## Results
+
+Trained from scratch on the full 167.1M-sample synthetic corpus (2 fonts,
+OnonSonin + Noto), 613-char curated alphabet, document-level train/val/test
+split. Warmup + ReduceLROnPlateau; early-stopped at step 132,000 (16.9M samples
+seen, ~0.1 epoch) once the LR floored with no val improvement.
+
+| split | norm CER | raw CER | WER | exact-line | n |
+|-------|---------|---------|-----|-----------|---|
+| val (best) | 1.20% | — | — | — | — |
+| **test** (untouched) | **1.10%** | 1.10% | 4.69% | 82.4% | 25,600 |
+
+The model (~6.4M params, 76 MB) reads vertical Mongolian lines at ~1% character
+error. Residual errors are dominated by the hardest native distinctions —
+`ᠳ`/`ᠲ` (d/t) and free-variation encoding variants.
+
+**Caveat (honest):** this is measured on **held-out synthetic** rendered lines,
+not real book scans. A real-scan error rate requires a real, transcribed probe
+set and will differ. Treat 1.10% as the synthetic-domain number.
+
 ## CER yardstick
 
 The primary metric is **normalized CER**: predictions and references are folded
