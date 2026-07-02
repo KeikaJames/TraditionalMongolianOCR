@@ -23,7 +23,8 @@ import torch
 from mongocr.alphabet import load as load_alphabet
 from mongocr.data import build_pipeline, list_shards, src_doc_bands
 from mongocr.metrics import ocr_report
-from mongocr.model import CRNN, greedy_decode
+from mongocr.model import (CRNN, WIDTH_COLLAPSE_MODES, greedy_decode,
+                           resolve_arch_from_ckpt)
 
 
 def main() -> int:
@@ -38,7 +39,14 @@ def main() -> int:
                     help="which held-out split to score (default: test = headline)")
     ap.add_argument("--img-h", type=int, default=1024)
     ap.add_argument("--img-w", type=int, default=64)
-    ap.add_argument("--lstm-hidden", type=int, default=384)
+    ap.add_argument("--lstm-hidden", type=int, default=384,
+                    help="overridden by the checkpoint's saved --lstm-hidden when "
+                         "present (older checkpoints predating this arg use this "
+                         "flag's value)")
+    ap.add_argument("--width-collapse", default=None, choices=[*WIDTH_COLLAPSE_MODES, None],
+                    help="overridden by the checkpoint's saved --width-collapse "
+                         "when present; only needed as a fallback for checkpoints "
+                         "saved before this flag existed (default: mean)")
     ap.add_argument("--batch-size", type=int, default=64)
     ap.add_argument("--num-workers", type=int, default=4)
     ap.add_argument("--max-batches", type=int, default=200)
@@ -55,15 +63,29 @@ def main() -> int:
     is_eval = is_test if args.split == "test" else is_val
     print(f"[eval] scoring {args.split.upper()} split", flush=True)
 
-    model = CRNN(alpha.n_classes, lstm_hidden=args.lstm_hidden).to(device)
     ckpt = torch.load(args.ckpt, map_location=device)
+    # Reconstruct the exact architecture the checkpoint was trained with —
+    # see mongocr.model.resolve_arch_from_ckpt for the legacy-checkpoint
+    # fallback reasoning (e.g. the production crnn_x2.pt, saved before
+    # --width-collapse/--lstm-hidden/--img-w existed as flags).
+    lstm_hidden, width_collapse, img_w = resolve_arch_from_ckpt(
+        ckpt, cli_lstm_hidden=args.lstm_hidden,
+        cli_width_collapse=args.width_collapse, cli_img_w=args.img_w)
+    print(f"[eval] arch: lstm_hidden={lstm_hidden} width_collapse={width_collapse} "
+          f"img_w={img_w} (from checkpoint args: "
+          f"{'yes' if ckpt.get('args') else 'no, using CLI/defaults'})", flush=True)
+
+    model = CRNN(alpha.n_classes, lstm_hidden=lstm_hidden,
+                 width_collapse=width_collapse, img_w=img_w).to(device)
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"[eval] params={n_params/1e6:.2f}M ({n_params:,})", flush=True)
     model.load_state_dict(ckpt["state_dict"])
     model.eval()
     if ckpt.get("alphabet") and ckpt["alphabet"] != alpha.chars:
         raise SystemExit("checkpoint alphabet != provided alphabet.json")
 
     import webdataset as wds
-    pipe = build_pipeline(shard_urls, alpha, img_h=args.img_h, img_w=args.img_w,
+    pipe = build_pipeline(shard_urls, alpha, img_h=args.img_h, img_w=img_w,
                           batch_size=args.batch_size, keep_src_doc=is_eval, training=False)
     loader = wds.WebLoader(pipe, batch_size=None, num_workers=args.num_workers)
 

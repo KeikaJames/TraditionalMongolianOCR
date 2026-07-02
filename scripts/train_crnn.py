@@ -32,7 +32,8 @@ from mongocr.alphabet import load as load_alphabet
 from mongocr.data import build_pipeline, list_shards, src_doc_bands
 from mongocr.losses import ctc_loss
 from mongocr.metrics import ocr_report
-from mongocr.model import CRNN, greedy_decode
+from mongocr.model import (CRNN, WIDTH_COLLAPSE_MODES, greedy_decode,
+                           matched_mean_big_hidden)
 
 
 def pick_device(flag: str) -> torch.device:
@@ -50,11 +51,11 @@ def pick_device(flag: str) -> torch.device:
 
 
 def make_loader(shard_urls, alpha, keep, *, img_h, img_w, batch_size, num_workers,
-                training):
+                training, data_seed=None):
     import webdataset as wds
     pipe = build_pipeline(
         shard_urls, alpha, img_h=img_h, img_w=img_w, batch_size=batch_size,
-        keep_src_doc=keep, training=training,
+        keep_src_doc=keep, training=training, data_seed=data_seed,
     )
     return wds.WebLoader(pipe, batch_size=None, num_workers=num_workers)
 
@@ -75,6 +76,20 @@ def evaluate(model, loader, blank, alphabet, device, max_batches=None):
     if not preds:
         return None
     return ocr_report(preds, refs).norm_cer
+
+
+def checkpoint_dict(model, opt, plateau, alpha, args, step, best_cer, no_improve,
+                    norm_cer=None):
+    """Shared checkpoint payload for the best/.last/.final saves — keeps the
+    three call sites (best-on-val, periodic .last, guaranteed-final) from
+    drifting out of sync on which keys they carry."""
+    d = {"state_dict": model.state_dict(), "opt": opt.state_dict(),
+         "plateau": plateau.state_dict(), "alphabet": alpha.chars,
+         "args": vars(args), "step": step, "best_cer": best_cer,
+         "no_improve": no_improve}
+    if norm_cer is not None:
+        d["norm_cer"] = norm_cer
+    return d
 
 
 def main() -> int:
@@ -109,10 +124,31 @@ def main() -> int:
     ap.add_argument("--img-h", type=int, default=1024)
     ap.add_argument("--img-w", type=int, default=64)
     ap.add_argument("--lstm-hidden", type=int, default=384)
+    ap.add_argument("--width-collapse", default="mean", choices=WIDTH_COLLAPSE_MODES,
+                    help="how the conv stem's residual width Wp is folded into "
+                         "the BiLSTM input (default: mean = current behavior). "
+                         "See mongocr/model.py CRNN docstring for the 4 modes.")
     ap.add_argument("--blank-bias", type=float, default=-3.0)
     ap.add_argument("--device", default="auto", choices=["auto", "cpu", "mps", "cuda"])
     ap.add_argument("--num-workers", type=int, default=8)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--data-seed", type=int, default=None,
+                    help="seed for the WebDataset shard-order + sample-buffer "
+                         "shuffles (wds.detshuffle). Default: None = unseeded "
+                         "wds.shuffle, today's wall-clock-jittered behavior, "
+                         "unchanged. Set this (e.g. equal to --seed) for a "
+                         "reproducible data order across independently launched "
+                         "runs — required for a fair multi-variant ablation, "
+                         "since each run's shuffle RNG is otherwise seeded from "
+                         "PID+wall-clock and NOT from --seed/torch.manual_seed.")
+    ap.add_argument("--no-early-stop", action="store_true",
+                    help="disable the LR-floored-and-plateaued early-stop break "
+                         "so training always runs to --steps. best_cer tracking, "
+                         "checkpoint saving, and the ReduceLROnPlateau LR decay "
+                         "itself are unaffected — this only skips the `break`. "
+                         "Use for a fixed-budget ablation across variants so a "
+                         "wider model that plateaus later cannot stop earlier "
+                         "than a narrower one under the same --early-stop-patience.")
     ap.add_argument("--save", default="", help="checkpoint path")
     ap.add_argument("--save-every", type=int, default=10000)
     ap.add_argument("--resume", default="", help="resume from checkpoint")
@@ -138,7 +174,8 @@ def main() -> int:
           f"test src_doc>={args.test_threshold} (reserved)", flush=True)
     train_loader = make_loader(shard_urls, alpha, is_train, img_h=args.img_h,
                                img_w=args.img_w, batch_size=args.batch_size,
-                               num_workers=args.num_workers, training=True)
+                               num_workers=args.num_workers, training=True,
+                               data_seed=args.data_seed)
 
     # Eval reads dedicated val shards if given (fast: only val data, no filtering
     # over the full corpus). Falls back to filtering the main shards otherwise.
@@ -158,7 +195,8 @@ def main() -> int:
                            num_workers=max(2, args.num_workers // 2), training=False)
 
     model = CRNN(alpha.n_classes, lstm_hidden=args.lstm_hidden,
-                 blank_bias=args.blank_bias).to(device)
+                 blank_bias=args.blank_bias, width_collapse=args.width_collapse,
+                 img_w=args.img_w).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
     # LR: linear warmup, then hold; halve on val-CER plateau (ReduceLROnPlateau),
@@ -194,7 +232,20 @@ def main() -> int:
         t_frames = model(probe).shape[1]
     n_params = sum(p.numel() for p in model.parameters())
     print(f"[crnn] device={device} params={n_params/1e6:.2f}M T(frames)={t_frames} "
-          f"img={args.img_h}x{args.img_w} batch={args.batch_size}", flush=True)
+          f"img={args.img_h}x{args.img_w} batch={args.batch_size} "
+          f"width_collapse={args.width_collapse} lstm_hidden={args.lstm_hidden}",
+          flush=True)
+    # Cheap extra guard beyond CRNN's own mean_big ValueError: pin down the
+    # launched variant's param count against a second, independent
+    # computation (matched_mean_big_hidden), so a future refactor that
+    # changes per-mode parameter shapes without updating the guard trips here
+    # instead of silently shipping an unmatched ablation arm.
+    if args.width_collapse == "mean_big":
+        expected_hidden = matched_mean_big_hidden(alpha.n_classes, args.img_w)
+        assert args.lstm_hidden == expected_hidden, (
+            f"mean_big launched with lstm_hidden={args.lstm_hidden}, expected "
+            f"{expected_hidden} (CRNN.__init__ should have already raised — "
+            f"this assert is a second, independent check)")
 
     seen = start_step * args.batch_size
     t0 = time.time()
@@ -249,15 +300,14 @@ def main() -> int:
                     best_cer = cer
                     no_improve = 0
                     if args.save:
-                        torch.save({"state_dict": model.state_dict(),
-                                    "opt": opt.state_dict(), "plateau": plateau.state_dict(),
-                                    "alphabet": alpha.chars, "args": vars(args), "step": step,
-                                    "norm_cer": cer, "best_cer": best_cer,
-                                    "no_improve": no_improve}, args.save)
+                        torch.save(checkpoint_dict(model, opt, plateau, alpha, args,
+                                                   step, best_cer, no_improve,
+                                                   norm_cer=cer), args.save)
                 else:
                     no_improve += 1
                     cur_lr = opt.param_groups[0]["lr"]
-                    if cur_lr <= min_lr * 1.001 and no_improve >= args.early_stop_patience:
+                    if (not args.no_early_stop and cur_lr <= min_lr * 1.001
+                            and no_improve >= args.early_stop_patience):
                         print(f"[crnn] early stop: LR floored ({cur_lr:.2e}) and "
                               f"{no_improve} evals w/o improvement "
                               f"(best norm_CER={best_cer:.4f} @ seen={seen:,})", flush=True)
@@ -266,10 +316,23 @@ def main() -> int:
         if args.save and step % args.save_every == 0:
             # resumable latest checkpoint — carries early-stop accounting so a
             # restart from .last continues without clobbering the best model.
-            torch.save({"state_dict": model.state_dict(), "opt": opt.state_dict(),
-                        "plateau": plateau.state_dict(), "alphabet": alpha.chars,
-                        "args": vars(args), "step": step, "best_cer": best_cer,
-                        "no_improve": no_improve}, args.save + ".last")
+            torch.save(checkpoint_dict(model, opt, plateau, alpha, args, step,
+                                       best_cer, no_improve), args.save + ".last")
+
+    if args.save:
+        # Guaranteed terminal-step checkpoint: the loop above only saves on a
+        # val-CER improvement (args.save) or every --save-every steps
+        # (args.save + ".last"), so the EXACT step the loop exits at (whether
+        # by hitting --steps or by the early-stop `break`) can fall between
+        # both and never get torch.save'd. Without this, a --no-early-stop
+        # --steps N run has no guarantee the step-N model itself is ever on
+        # disk, which breaks an equal-step-budget comparison across ablation
+        # variants (only a stale .last or a possibly-earlier "best" would be
+        # available). Always write it, unconditional on step % save_every.
+        torch.save(checkpoint_dict(model, opt, plateau, alpha, args, step,
+                                   best_cer, no_improve), args.save + ".final")
+        print(f"[crnn] wrote terminal checkpoint -> {args.save}.final "
+              f"(step={step})", flush=True)
 
     print(f"[crnn] done: step={step} seen={seen:,} best_norm_CER={best_cer:.4f}", flush=True)
     return 0

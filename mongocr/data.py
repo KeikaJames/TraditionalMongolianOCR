@@ -174,12 +174,39 @@ def build_pipeline(
     training: bool = True,
     shard_shuffle: int = 200,
     sample_shuffle: int = 4000,
+    data_seed: int | None = None,
 ):
     """Build a ``wds.DataPipeline`` yielding ``(imgs, padded, lengths)`` batches.
 
     ``keep_src_doc`` filters samples by their json ``src_doc`` (train/eval split).
     Worker/node splitting guarantees each shard is consumed by exactly one
     worker, so samples are never duplicated across the pool.
+
+    ``data_seed``: when ``None`` (default), the two training-time shuffle stages
+    use plain ``wds.shuffle``, whose RNG falls back to
+    ``random.Random(pid + wall_clock)`` when unseeded — i.e. today's behavior,
+    unchanged, where shard-order and sample-buffer order differ across every
+    launch even with the same ``--seed``. When an int is given, both stages use
+    ``wds.detshuffle`` instead (the only shuffle mechanism with an identical
+    signature across webdataset 0.2.86, this repo's pinned floor, and current
+    releases — plain ``wds.shuffle`` does not accept ``seed=`` on 0.2.86), seeded
+    ``data_seed`` and ``data_seed + 1`` respectively so the two stages don't share
+    one RNG stream. This makes data order reproducible across independently
+    launched runs (needed for a fair from-scratch ablation across model variants)
+    without changing any existing call site that leaves ``data_seed`` unset.
+    ``split_by_worker`` runs before either shuffle stage, so passing the same
+    ``data_seed`` to every DataLoader worker is correct: each worker's local
+    shuffle only reorders the disjoint shard subset it was already given.
+    ``wds.detshuffle`` is not itself worker-aware (it seeds its RNG from
+    ``seed + epoch`` alone, with no worker id mixed in) — reproducibility
+    under real ``num_workers > 0`` therefore rests entirely on
+    ``split_by_worker`` already having partitioned shards disjointly before
+    either shuffle stage runs, which is what makes an identical seed across
+    workers safe rather than a collision risk. Verified under an actual
+    ``wds.WebLoader(..., num_workers=2)`` (forked workers, matching this
+    repo's Linux training default) in ``tests/test_data.py``: same
+    ``data_seed`` -> byte-identical sample order across two runs, and no
+    sample is ever duplicated or dropped across workers.
     """
     import webdataset as wds
 
@@ -202,18 +229,24 @@ def build_pipeline(
         target = torch.tensor(alpha.encode(sample["meta"]["text"]), dtype=torch.long)
         return x, target
 
+    def shuffle_stage(bufsize, seed):
+        if data_seed is None:
+            return wds.shuffle(bufsize)
+        return wds.detshuffle(bufsize, seed=seed)
+
     stages = [
         wds.SimpleShardList(shard_urls),
         wds.split_by_node,
         wds.split_by_worker,
     ]
     if training and shard_shuffle:
-        stages.append(wds.shuffle(shard_shuffle))   # shard-order shuffle
+        stages.append(shuffle_stage(shard_shuffle, data_seed))       # shard-order
     stages.append(wds.tarfile_to_samples(handler=wds.warn_and_continue))
     stages.append(wds.map(parse, handler=wds.warn_and_continue))
     stages.append(wds.select(keep))
     if training and sample_shuffle:
-        stages.append(wds.shuffle(sample_shuffle))  # sample-buffer shuffle
+        seed = None if data_seed is None else data_seed + 1
+        stages.append(shuffle_stage(sample_shuffle, seed))           # sample-buffer
     stages.append(wds.map(to_tensors, handler=wds.warn_and_continue))
     stages.append(wds.batched(batch_size, collation_fn=collate, partial=not training))
     return wds.DataPipeline(*stages)
